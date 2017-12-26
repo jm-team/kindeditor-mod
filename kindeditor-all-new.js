@@ -4369,6 +4369,9 @@
             self._itemMap = {};
             self.div.addClass('ke-toolbar').
                 bind('contextmenu,mousedown,mousemove', function(e) {
+                    //by francklin 2017.09.21
+                    if(e.target&&e.target.type=="file") return;
+                    
                     e.preventDefault();
                 }).
                 attr('unselectable', 'on');
@@ -7929,6 +7932,9 @@ KindEditor.plugin('image', function(K) {
         allowImageUpload = K.undef(self.allowImageUpload, true),
         allowImageRemote = K.undef(self.allowImageRemote, true),
         formatUploadUrl = K.undef(self.formatUploadUrl, true),
+        imageFileBasePath = K.undef(self.baseFilePath, ''),
+        imageSizeLimit = K.undef(self.imageSizeLimit, '5MB'),
+        imageFileTypes = K.undef(self.imageFileTypes, '.jpg,.gif,.png'),
         allowFileManager = K.undef(self.allowFileManager, false),
         uploadJson = K.undef(self.uploadJson,
             self.basePath + 'php/upload_json.php'),
@@ -8003,8 +8009,8 @@ KindEditor.plugin('image', function(K) {
             hiddenElements.join(''),
             '<label style="width:60px;">' + lang.localUrl + '</label>',
             '<input type="text" name="localUrl" class="ke-input-text" tabindex="-1" style="width:200px;" readonly="true" /> &nbsp;',
-            '<input type="button" class="ke-upload-button" value="' +
-            lang.upload + '" />',
+            '<span class="ke-button-common ke-button-outer"><input type="button" id="ke-upload-button" class="ke-button-common ke-button" value="' +
+            lang.upload + '" /></span>',
             '</div>',
             '</form>',
             '</div>',
@@ -8026,7 +8032,7 @@ KindEditor.plugin('image', function(K) {
                         }
                         if (showLocal && showRemote && tabs &&
                             tabs.selectedIndex === 1 || !showRemote) {
-                            if (uploadbutton.fileBox.val() == '') {
+                            if (!uploadbutton.file) {
                                 alert(self.lang('pleaseSelectFile'));
                                 return;
                             }
@@ -8100,41 +8106,74 @@ KindEditor.plugin('image', function(K) {
         } else if (showLocal) {
             K('.tab2', div).show();
         }
-        var uploadbutton = K.uploadbutton({
-            button: K('.ke-upload-button', div)[0],
-            fieldName: filePostName,
-            form: K('.ke-form', div),
-            target: target,
-            width: 60,
-            afterUpload: function(data) {
+        //added by francklin 20161129
+        var uploader = null;
+        var id = null;
+        var uploadbutton = {
+            ele: $('#ke-upload-button', div),
+            file: null,
+            init: function(para) {
+                fileUpload(para);
+            },
+            submit: function() {
+                uploader.retry(id);
+            },
+            cancel: function() {
+                localUrlBox.val('');
+                this.file = null;
+                uploader.cancel(id);
+            }
+        };
+
+        uploadbutton.init({
+            'endpoint': uploadJson,
+            'formData': extraParams,
+            'uploadId': uploadbutton.ele[0],
+            'fileType': 'image',
+            'fileExt': imageFileTypes,
+            'fileQueueAuto': false,
+            'fileMulti': false,
+            'width': 51,
+            'height': 23,
+            'onSelect': function(file, queueID, fileName, uploadInstance) {
+                uploader = uploadInstance;
+                id = queueID;
+
+                uploadbutton.file = file;
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('上传文件不允许大于' + imageSizeLimit);
+                    uploadbutton.cancel();
+                    return false;
+                }
+                localUrlBox.val(file.name);
+            },
+            'callback': function(rData) {
                 dialog.hideLoading();
-                if (data.error === 0) {
-                    var url = data.url;
+
+                //var rData = JSON.parse(data);
+                if (rData && rData.resultCode == 4) {
+                    var url = rData.filePaths.pop() || '';
+                    if (imageFileBasePath) url = imageFileBasePath + url;
                     if (formatUploadUrl) {
                         url = K.formatUrl(url, 'absolute');
                     }
                     if (self.afterUpload) {
-                        self.afterUpload.call(self, url, data, name);
+                        self.afterUpload.call(self, url, rData, name);
                     }
                     if (!fillDescAfterUploadImage) {
-                        clickFn.call(self, url, data.title, data.width,
-                            data.height, data.border, data.align);
+                        clickFn.call(self, url,
+                            rData.originalFileNames.pop() || '',
+                            rData.width, rData.height, rData.border,
+                            rData.align);
                     } else {
                         K('.ke-dialog-row #remoteUrl', div).val(url);
                         K('.ke-tabs-li', div)[0].click();
                         K('.ke-refresh-btn', div).click();
                     }
                 } else {
-                    alert(data.message);
+                    alert(rData.returnMsg);
                 }
-            },
-            afterError: function(html) {
-                dialog.hideLoading();
-                self.errorDialog(html);
             }
-        });
-        uploadbutton.fileBox.change(function(e) {
-            localUrlBox.val(uploadbutton.fileBox.val());
         });
         if (allowFileManager) {
             viewServerBtn.click(function(e) {
@@ -8786,22 +8825,37 @@ KindEditor.plugin('media', function(K) {
                         self.bodyDiv).eq(0);
                     var data = {};
                     try {
-                        data = K.json(serverData);
+                        var data1 = K.json(serverData);
+                        //现在拿到的是临时文件，需要再取一次
+                        $.getJSON('/getFile?uuid=' + data1.fileUUIDs[0],
+                            function(dataStr) {
+                                var data2 = JSON.parse(dataStr);//JSON.parse(dataStr);
+                                //added by francklin
+                                data = {
+                                    error: data2.resultCode == 4 ? 0 : 1,
+                                    message: data2.resultMsg,
+                                    url: data2.filePaths.pop() || ''
+                                };
+                                if (data.error !== 0) {
+                                    showError(itemDiv, K.DEBUG
+                                        ? data.message
+                                        : self.options.errorMessage);
+                                    return;
+                                }
+                                if (self.options.fileBasePath) {
+                                    data.url = self.options.fileBasePath + data.url;
+                                }
+                                file.url = data.url;
+                                K('.ke-img', itemDiv).
+                                    attr('src', file.url).
+                                    attr('data-status', file.filestatus).
+                                    data('data', data);
+                                K('.ke-status > div', itemDiv).hide();
+                            });
                     } catch (e) {
                         self.options.afterError.call(this,
                             '<!doctype html><html>' + serverData + '</html>');
                     }
-                    if (data.error !== 0) {
-                        showError(itemDiv,
-                            K.DEBUG ? data.message : self.options.errorMessage);
-                        return;
-                    }
-                    file.url = data.url;
-                    K('.ke-img', itemDiv).
-                        attr('src', file.url).
-                        attr('data-status', file.filestatus).
-                        data('data', data);
-                    K('.ke-status > div', itemDiv).hide();
                 }
             };
             self.swfu = new SWFUpload(settings);
@@ -8890,8 +8944,8 @@ KindEditor.plugin('multiimage', function(K) {
         uploadJson = K.undef(self.uploadJson,
             self.basePath + 'php/upload_json.php'),
         imgPath = self.pluginsPath + 'multiimage/images/',
-        imageSizeLimit = K.undef(self.imageSizeLimit, '1MB'),
-        imageFileTypes = K.undef(self.imageFileTypes, '*.jpg;*.gif;*.png'),
+        imageSizeLimit = K.undef(self.imageSizeLimit, '5MB'),
+        imageFileBasePath = K.undef(self.baseFilePath, ''),
         imageUploadLimit = K.undef(self.imageUploadLimit, 20),
         filePostName = K.undef(self.filePostName, 'imgFile'),
         lang = self.lang(name + '.');
@@ -8947,6 +9001,7 @@ KindEditor.plugin('multiimage', function(K) {
             fileTypesDesc: 'Image Files',
             fileUploadLimit: imageUploadLimit,
             fileSizeLimit: imageSizeLimit,
+            fileBasePath: imageFileBasePath,	//added by francklin 20161129
             postParams: K.undef(self.extraFileUploadParams, {}),
             queueLimitExceeded: lang.queueLimitExceeded,
             fileExceedsSizeLimit: lang.fileExceedsSizeLimit,
